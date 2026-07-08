@@ -18,7 +18,6 @@ from src.providers.realtime_tts import (
     warmup_realtime_tts_session,
 )
 from src.providers.tts import synthesize_audio
-from src.rag.retriever import is_coffee_question, retrieve_references
 from src.settings import settings
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
 from src.voice_skills.router import route_voice_skill
@@ -40,6 +39,18 @@ _ASR_NORMALIZATION_RULES: tuple[tuple[str, str], ...] = (
     ("\u676f\u662f\u9178\u7684", "\u5496\u5561\u662f\u9178\u7684"),
 )
 logger = logging.getLogger(__name__)
+
+
+def is_coffee_question(text: str) -> bool:
+    from src.rag.retriever import is_coffee_question as _is_coffee_question
+
+    return _is_coffee_question(text)
+
+
+def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[list[dict], float]:
+    from src.rag.retriever import retrieve_references as _retrieve_references
+
+    return _retrieve_references(question_text, top_k=top_k)
 
 
 def _elapsed_ms(started_at: float, finished_at: float | None = None) -> int:
