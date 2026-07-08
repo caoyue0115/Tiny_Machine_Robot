@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
+import wave
 from unittest import mock
 
 from tests._stubs import install_dependency_stubs
 
 install_dependency_stubs()
+
+
+def _write_test_wav(frames: bytes) -> str:
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    with wave.open(tmp.name, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16000)
+        writer.writeframes(frames)
+    return tmp.name
 
 
 class VoiceSkillRouterTests(unittest.TestCase):
@@ -15,7 +29,7 @@ class VoiceSkillRouterTests(unittest.TestCase):
 
         store = InMemoryIdiomGameStore(ttl_seconds=900)
         router = SkillRouter(
-            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store),
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
             companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}:{answer_mode}"]),
         )
 
@@ -32,7 +46,7 @@ class VoiceSkillRouterTests(unittest.TestCase):
 
         store = InMemoryIdiomGameStore(ttl_seconds=900)
         router = SkillRouter(
-            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store),
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
             companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
         )
         router.route(device_id="esp-1", text="开始成语接龙")
@@ -50,7 +64,7 @@ class VoiceSkillRouterTests(unittest.TestCase):
 
         store = InMemoryIdiomGameStore(ttl_seconds=900)
         router = SkillRouter(
-            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store),
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
             companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
         )
         router.route(device_id="esp-1", text="开始成语接龙")
@@ -63,12 +77,33 @@ class VoiceSkillRouterTests(unittest.TestCase):
         self.assertIn("这局先到这里", exited.answer_text)
         self.assertFalse(store.is_active("esp-1"))
 
+    def test_idiom_game_extracts_idiom_from_noisy_answer_and_uses_expanded_lexicon(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, clean_idiom_text, load_default_idioms
+        from src.voice_skills.router import SkillRouter
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        continued = router.route(device_id="esp-1", text="小机仔，那我接精忠报国吧")
+
+        self.assertEqual(clean_idiom_text("小机仔，那我接精忠报国吧"), "精忠报国")
+        self.assertEqual(continued.skill_name, "idiom_game")
+        self.assertIn("小机仔接：国泰民安", continued.answer_text)
+
     def test_weather_and_translation_are_explicit_placeholders(self) -> None:
         from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
         from src.voice_skills.router import SkillRouter
 
         router = SkillRouter(
-            idiom_skill=IdiomGameSkill(load_default_idioms(), store=InMemoryIdiomGameStore(ttl_seconds=900)),
+            idiom_skill=IdiomGameSkill(
+                load_default_idioms(),
+                store=InMemoryIdiomGameStore(ttl_seconds=900),
+                opening_words=("画龙点睛",),
+            ),
             companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
         )
 
@@ -85,7 +120,11 @@ class VoiceSkillRouterTests(unittest.TestCase):
         from src.voice_skills.router import SkillRouter
 
         router = SkillRouter(
-            idiom_skill=IdiomGameSkill(load_default_idioms(), store=InMemoryIdiomGameStore(ttl_seconds=900)),
+            idiom_skill=IdiomGameSkill(
+                load_default_idioms(),
+                store=InMemoryIdiomGameStore(ttl_seconds=900),
+                opening_words=("画龙点睛",),
+            ),
             companion_streamer=lambda text, answer_mode=None: iter([f"陪伴:{text}:{answer_mode}"]),
         )
 
@@ -127,7 +166,115 @@ class RealtimeSkillIntegrationTests(unittest.TestCase):
         updated = store.get_session(session["session_id"])
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["trace"]["skill_name"], "idiom_game")
-        self.assertIn("画龙点睛", updated["answer_text"])
+        self.assertIn("好呀，我们玩成语接龙", updated["answer_text"])
+
+    def test_realtime_session_uses_static_audio_plan_before_tts(self) -> None:
+        from src.services import realtime_session as realtime_session_service
+        from src.storage.realtime_store import InMemoryRealtimeSessionStore
+        from src.voice_skills.router import SkillResult
+
+        audio_plan = [
+            "idiom_game/robot_reply",
+            "idioms/国泰民安",
+            "idiom_game/turn_prompt",
+            "pinyin/an",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for index, segment_id in enumerate(audio_plan, start=1):
+                path = root / f"{segment_id}.pcm"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(bytes([index, 0]))
+
+            store = InMemoryRealtimeSessionStore(base_url="http://testserver")
+            session = store.create_session(device_id="esp-static-audio")
+            store.update_session(session["session_id"], question_text="我接精忠报国")
+
+            original_static_audio_dir = realtime_session_service.settings.static_audio_dir
+            original_static_audio_enabled = realtime_session_service.settings.static_audio_enabled
+            try:
+                realtime_session_service.settings.static_audio_dir = str(root)
+                realtime_session_service.settings.static_audio_enabled = True
+                with mock.patch.object(
+                    realtime_session_service,
+                    "route_voice_skill",
+                    return_value=SkillResult(
+                        skill_name="idiom_game",
+                        answer_text="小机仔接：国泰民安。轮到你啦，要接“an”。",
+                        audio_plan=audio_plan,
+                        trace={"skill_name": "idiom_game"},
+                    ),
+                ), mock.patch.object(
+                    realtime_session_service,
+                    "realtime_tts_health",
+                    return_value=True,
+                ), mock.patch.object(
+                    realtime_session_service,
+                    "stream_realtime_tts_chunks",
+                    side_effect=AssertionError("realtime TTS should not run for complete static audio plan"),
+                ), mock.patch.object(
+                    realtime_session_service,
+                    "synthesize_audio",
+                    side_effect=AssertionError("fallback TTS should not run for complete static audio plan"),
+                ):
+                    realtime_session_service.run_stub_realtime_session(store, session["session_id"])
+            finally:
+                realtime_session_service.settings.static_audio_dir = original_static_audio_dir
+                realtime_session_service.settings.static_audio_enabled = original_static_audio_enabled
+
+        updated = store.get_session(session["session_id"])
+        self.assertEqual(updated["status"], "done")
+        self.assertEqual(updated["trace"]["static_audio_used"], True)
+        self.assertEqual(updated["trace"]["static_audio_segment_count"], len(audio_plan))
+        self.assertEqual(updated["trace"]["audio_bytes"], len(audio_plan) * 2)
+
+    def test_realtime_session_falls_back_to_tts_when_static_audio_plan_is_incomplete(self) -> None:
+        from src.services import realtime_session as realtime_session_service
+        from src.storage.realtime_store import InMemoryRealtimeSessionStore
+        from src.voice_skills.router import SkillResult
+
+        wav_path = _write_test_wav(b"\x01\x00\x02\x00")
+        store = InMemoryRealtimeSessionStore(base_url="http://testserver")
+        session = store.create_session(device_id="esp-static-audio-fallback")
+        store.update_session(session["session_id"], question_text="我接精忠报国")
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                original_static_audio_dir = realtime_session_service.settings.static_audio_dir
+                original_static_audio_enabled = realtime_session_service.settings.static_audio_enabled
+                try:
+                    realtime_session_service.settings.static_audio_dir = tmpdir
+                    realtime_session_service.settings.static_audio_enabled = True
+                    with mock.patch.object(
+                        realtime_session_service,
+                        "route_voice_skill",
+                        return_value=SkillResult(
+                            skill_name="idiom_game",
+                            answer_text="小机仔接：国泰民安。轮到你啦，要接“an”。",
+                            audio_plan=["idiom_game/robot_reply", "idioms/国泰民安", "idiom_game/turn_prompt", "pinyin/an"],
+                            trace={"skill_name": "idiom_game"},
+                        ),
+                    ), mock.patch.object(
+                        realtime_session_service,
+                        "realtime_tts_health",
+                        return_value=False,
+                    ), mock.patch.object(
+                        realtime_session_service,
+                        "synthesize_audio",
+                        return_value=(wav_path, None),
+                    ) as synthesize_audio:
+                        realtime_session_service.run_stub_realtime_session(store, session["session_id"])
+                finally:
+                    realtime_session_service.settings.static_audio_dir = original_static_audio_dir
+                    realtime_session_service.settings.static_audio_enabled = original_static_audio_enabled
+        finally:
+            Path(wav_path).unlink(missing_ok=True)
+
+        updated = store.get_session(session["session_id"])
+        self.assertEqual(updated["status"], "done")
+        self.assertEqual(updated["trace"]["static_audio_used"], False)
+        self.assertEqual(updated["trace"]["static_audio_missing"], True)
+        synthesize_audio.assert_called()
 
 
 if __name__ == "__main__":

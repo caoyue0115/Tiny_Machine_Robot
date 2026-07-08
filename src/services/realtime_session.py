@@ -17,6 +17,7 @@ from src.providers.realtime_tts import (
     stream_realtime_tts_chunks,
     warmup_realtime_tts_session,
 )
+from src.providers.static_audio import resolve_static_audio_plan, stream_static_audio_paths
 from src.providers.tts import synthesize_audio
 from src.settings import settings
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
@@ -398,7 +399,17 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     store.update_session(session_id, step="llm", trace=updated["trace"])
     is_reject = False
     prepared_tts_session: PreparedRealtimeTtsSession | None = None
-    if realtime_tts_health() and settings.realtime_tts_warmup_enabled:
+    answer_segments: list[str] = []
+    answer_text = str(skill_result.answer_text or "").strip()
+    static_audio_paths = resolve_static_audio_plan(skill_result.audio_plan or []) if skill_result.audio_plan else None
+    if static_audio_paths is not None:
+        updated["trace"]["static_audio_used"] = True
+        updated["trace"]["static_audio_segment_count"] = len(static_audio_paths)
+    elif skill_result.audio_plan:
+        updated["trace"]["static_audio_used"] = False
+        updated["trace"]["static_audio_missing"] = True
+        updated["trace"]["static_audio_segment_count"] = len(skill_result.audio_plan)
+    if static_audio_paths is None and realtime_tts_health() and settings.realtime_tts_warmup_enabled:
         warmup_started = time.perf_counter()
         try:
             prepared_tts_session = warmup_realtime_tts_session()
@@ -407,10 +418,8 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
             prepared_tts_session = None
             updated["trace"]["tts_warmup_failed"] = True
         updated["trace"]["tts_warmup_ms"] = _elapsed_ms(warmup_started)
-    answer_segments: list[str] = []
-    answer_text = str(skill_result.answer_text or "").strip()
     llm_stream: Iterable[str] = skill_result.answer_stream or (iter([answer_text]) if answer_text else iter(()))
-    if not realtime_tts_health():
+    if static_audio_paths is None and not realtime_tts_health():
         answer_parts: list[str] = []
         pending_answer = ""
         try:
@@ -534,7 +543,51 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
         audio_bytes = 0
         audio_chunk_count = 0
         audio_max_chunk_gap_ms = 0
-        if realtime_tts_health():
+        if static_audio_paths is not None:
+            try:
+                _set_trace_default(updated["trace"], "first_llm_chunk_ms", _elapsed_ms(overall_started))
+                _set_abs_trace(
+                    updated["trace"],
+                    "first_llm_chunk_abs_ms",
+                    stream_to_session_start_abs_ms,
+                    updated["trace"]["first_llm_chunk_ms"],
+                )
+                for chunk in stream_static_audio_paths(static_audio_paths):
+                    if not chunk:
+                        continue
+                    now = time.perf_counter()
+                    if audio_stream_started_at is None:
+                        audio_stream_started_at = now
+                    if audio_last_chunk_at is not None:
+                        audio_max_chunk_gap_ms = max(
+                            audio_max_chunk_gap_ms,
+                            _elapsed_ms(audio_last_chunk_at, now),
+                        )
+                    audio_last_chunk_at = now
+                    audio_chunk_count += 1
+                    audio_bytes += len(chunk)
+                    _record_audio_chunk_trace(
+                        updated["trace"],
+                        audio_chunk_count,
+                        audio_bytes,
+                        audio_max_chunk_gap_ms,
+                    )
+                    if not started_streaming:
+                        _record_first_audio_trace(updated["trace"], overall_started, stream_to_session_start_abs_ms)
+                        store.update_session(session_id, step="streaming", trace=updated["trace"])
+                        store.update_session(
+                            session_id,
+                            trace=updated["trace"],
+                            final_reason="completed_answer",
+                        )
+                        started_streaming = True
+                    store.append_audio_chunk(session_id, chunk)
+            except ValueError as exc:
+                error_code = str(exc)
+                store.mark_failed(session_id, error_code, error_code)
+                store.fail_audio(session_id, error_code)
+                return
+        elif realtime_tts_health():
             answer_parts = []
             pending_answer = ""
             try:
@@ -690,6 +743,10 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                 if audio_stream_wall_ms > 0
                 else None
             )
+        if static_audio_paths is not None and not started_streaming:
+            store.mark_failed(session_id, "tts_empty_audio", "tts_empty_audio")
+            store.fail_audio(session_id, "tts_empty_audio")
+            return
         _set_trace_default(updated["trace"], "llm_chunk_count", 0)
         _set_trace_default(updated["trace"], "tts_segment_count", 0)
         _set_trace_default(updated["trace"], "segment_ready_ms", [])

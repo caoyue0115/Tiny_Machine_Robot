@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     realtime_tts_warmup_enabled: bool = True
     realtime_llm_compact_top_k: int = 1
     realtime_llm_compact_snippet_chars: int = 36
+    static_audio_enabled: bool = True
+    static_audio_dir: str = "./data/static_audio"
+    static_audio_chunk_size: int = 300
     project_name: str = "Tiny Machine Voice Pet"
     version: str = "0.1.0"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -105,6 +108,13 @@ class Settings(BaseSettings):
     @property
     def output_dir(self) -> Path:
         return self.data_dir / "output"
+
+    @property
+    def static_audio_path(self) -> Path:
+        raw = Path(self.static_audio_dir)
+        if raw.is_absolute():
+            return raw
+        return (self.project_root / raw).resolve()
 
     @property
     def ota_artifact_path(self) -> Path:

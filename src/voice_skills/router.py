@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 
 from src.settings import settings
 from src.voice_skills.companion_chat import stream_companion_chat
-from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, clean_idiom_text, load_default_idioms
+from src.voice_skills.idiom_game import (
+    IdiomGameSkill,
+    InMemoryIdiomGameStore,
+    build_idiom_audio_plan,
+    clean_idiom_text,
+    load_default_idioms,
+)
 
 
 CompanionStreamer = Callable[[str, str | None], Iterable[str]]
@@ -19,6 +25,7 @@ class SkillResult:
     skill_name: str
     answer_text: str | None = None
     answer_stream: Iterable[str] | None = None
+    audio_plan: list[str] | None = None
     end_skill_state: bool = False
     trace: dict = field(default_factory=dict)
 
@@ -57,16 +64,30 @@ class SkillRouter:
 
         if "idiom_game" in self._enabled_skills and self._idiom_skill.store.is_active(device_id):
             if self._matches_any(cleaned_text, _EXIT_IDIOM_GAME_PHRASES):
+                answer_text = self._idiom_skill.exit(device_id)
                 return self._text_result(
                     "idiom_game",
-                    self._idiom_skill.exit(device_id),
+                    answer_text,
                     base_trace,
+                    audio_plan=build_idiom_audio_plan(answer_text),
                     end_skill_state=True,
                 )
-            return self._text_result("idiom_game", self._idiom_skill.handle(device_id, raw_text), base_trace)
+            answer_text = self._idiom_skill.handle(device_id, raw_text)
+            return self._text_result(
+                "idiom_game",
+                answer_text,
+                base_trace,
+                audio_plan=build_idiom_audio_plan(answer_text),
+            )
 
         if "idiom_game" in self._enabled_skills and self._matches_any(cleaned_text, _START_IDIOM_GAME_PHRASES):
-            return self._text_result("idiom_game", self._idiom_skill.start(device_id), base_trace)
+            answer_text = self._idiom_skill.start(device_id)
+            return self._text_result(
+                "idiom_game",
+                answer_text,
+                base_trace,
+                audio_plan=build_idiom_audio_plan(answer_text),
+            )
 
         if "天气" in cleaned_text:
             return self._text_result("weather_placeholder", "天气技能还没接好，小机仔先不乱报天气。", base_trace)
@@ -94,11 +115,13 @@ class SkillRouter:
         answer_text: str,
         trace: dict,
         *,
+        audio_plan: list[str] | None = None,
         end_skill_state: bool = False,
     ) -> SkillResult:
         return SkillResult(
             skill_name=skill_name,
             answer_text=answer_text,
+            audio_plan=audio_plan,
             end_skill_state=end_skill_state,
             trace=self._trace(trace, skill_name),
         )

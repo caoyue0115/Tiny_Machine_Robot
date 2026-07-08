@@ -23,6 +23,9 @@ def test_tiny_defaults_identify_public_project_and_realtime_chain() -> None:
     assert settings.realtime_enabled is True
     assert settings.realtime_audio_enable_opus is True
     assert settings.realtime_tts_model == "qwen3-tts-flash-realtime-2025-11-27"
+    assert settings.static_audio_enabled is True
+    assert settings.static_audio_dir == "./data/static_audio"
+    assert settings.static_audio_chunk_size == 300
     assert (
         settings.tts_instructions
         == "请使用明亮、亲切、有一点活泼感的中文声音，语速自然，适合小机仔语音桌宠播报。"
