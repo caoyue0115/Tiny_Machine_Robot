@@ -5,7 +5,7 @@ import random
 import re
 import time
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +16,35 @@ _CHAIN_REPLY_RE = re.compile(r"小机仔接：(?P<word>[^。]+)。轮到你啦�
 _NEED_REPLY_RE = re.compile(r"要接“(?P<py>[^”]+)”开头的成语哦")
 _REPEATED_REPLY_RE = re.compile(r"“(?P<word>[^”]+)”刚刚用过啦")
 _WIN_REPLY_RE = re.compile(r"你接上了“(?P<word>[^”]+)”，小机仔暂时接不上啦")
+_PINYIN_TONE_TRANS = str.maketrans(
+    {
+        "ā": "a",
+        "á": "a",
+        "ǎ": "a",
+        "à": "a",
+        "ē": "e",
+        "é": "e",
+        "ě": "e",
+        "è": "e",
+        "ī": "i",
+        "í": "i",
+        "ǐ": "i",
+        "ì": "i",
+        "ō": "o",
+        "ó": "o",
+        "ǒ": "o",
+        "ò": "o",
+        "ū": "u",
+        "ú": "u",
+        "ǔ": "u",
+        "ù": "u",
+        "ǖ": "v",
+        "ǘ": "v",
+        "ǚ": "v",
+        "ǜ": "v",
+        "ü": "v",
+    }
+)
 _ASSISTANT_PREFIXES = ("小机仔", "小明同学")
 _LEADING_NOISE_PHRASES = tuple(
     sorted(
@@ -64,6 +93,79 @@ _DEFAULT_OPENING_WORDS = (
     "长驱直入",
     "入木三分",
 )
+_ROBOT_REPLY_LIMITS: dict[str, int | None] = {
+    "easy": 500,
+    "normal": 3000,
+    "hard": 10000,
+    "full": None,
+}
+_DIFFICULTY_LABELS = {
+    "easy": "简单",
+    "normal": "普通",
+    "hard": "困难",
+    "full": "大师",
+}
+_DIFFICULTY_COMMAND_PATTERNS = (
+    (
+        "easy",
+        (
+            "简单模式",
+            "容易模式",
+            "简单难度",
+            "低难度",
+            "切换简单",
+            "切换到简单",
+            "换成简单",
+            "改成简单",
+            "调成简单",
+            "简单一点",
+            "容易一点",
+        ),
+    ),
+    (
+        "normal",
+        (
+            "普通模式",
+            "正常模式",
+            "标准模式",
+            "普通难度",
+            "切换普通",
+            "切换到普通",
+            "换成普通",
+            "改成普通",
+            "调成普通",
+        ),
+    ),
+    (
+        "hard",
+        (
+            "困难模式",
+            "难度模式",
+            "挑战模式",
+            "困难难度",
+            "高难度",
+            "切换困难",
+            "切换到困难",
+            "换成困难",
+            "改成困难",
+            "调成困难",
+            "难一点",
+        ),
+    ),
+    (
+        "full",
+        (
+            "大师模式",
+            "全量模式",
+            "专家模式",
+            "全部词库",
+            "完整词库",
+            "切换大师",
+            "切换到大师",
+            "换成大师",
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -73,11 +175,30 @@ class IdiomEntry:
     last_py: str
 
 
+@dataclass(frozen=True)
+class IdiomJudgeDecision:
+    word: str
+    first_py: str
+    last_py: str
+    confidence: float = 1.0
+    is_idiom: bool = True
+
+
+JudgeUnknownIdiom = Callable[[str, str], IdiomJudgeDecision | None]
+
+
 @dataclass
 class IdiomGameState:
     expected_py: str
     used_words: set[str] = field(default_factory=set)
+    valid_user_turns: int = 0
+    robot_difficulty: str = "full"
     updated_at: float = field(default_factory=time.time)
+
+
+def normalize_pinyin(value: str) -> str:
+    normalized = str(value or "").strip().lower().translate(_PINYIN_TONE_TRANS)
+    return re.sub(r"[^a-z]", "", normalized)
 
 
 def clean_idiom_text(text: str) -> str:
@@ -94,8 +215,28 @@ def clean_idiom_text(text: str) -> str:
     return cleaned
 
 
+def normalize_robot_difficulty(value: str) -> str:
+    difficulty = str(value or "").strip().lower()
+    return difficulty if difficulty in _ROBOT_REPLY_LIMITS else "normal"
+
+
+def robot_difficulty_label(value: str) -> str:
+    return _DIFFICULTY_LABELS[normalize_robot_difficulty(value)]
+
+
+def detect_idiom_difficulty(text: str) -> str | None:
+    cleaned = clean_idiom_text(text)
+    for difficulty, patterns in _DIFFICULTY_COMMAND_PATTERNS:
+        if any(pattern in cleaned for pattern in patterns):
+            return difficulty
+    return None
+
+
 def build_idiom_audio_plan(answer_text: str) -> list[str] | None:
     text = str(answer_text or "")
+    if "已切换到" in text and "模式" in text:
+        return None
+
     start_match = _START_REPLY_RE.search(text)
     if start_match:
         return [
@@ -152,8 +293,8 @@ def load_default_idioms(path: Path | None = None) -> list[IdiomEntry]:
     return [
         IdiomEntry(
             word=str(item["word"]),
-            first_py=str(item["first_py"]).strip().lower(),
-            last_py=str(item["last_py"]).strip().lower(),
+            first_py=normalize_pinyin(str(item["first_py"])),
+            last_py=normalize_pinyin(str(item["last_py"])),
         )
         for item in payload
     ]
@@ -193,6 +334,11 @@ class IdiomGameSkill:
         store: InMemoryIdiomGameStore | None = None,
         *,
         opening_words: Iterable[str] | None = None,
+        judge_unknown_idiom: JudgeUnknownIdiom | None = None,
+        judge_min_confidence: float = 0.8,
+        robot_difficulty: str = "full",
+        robot_reply_limit: int | None = None,
+        target_user_turns: int = 0,
         rng: random.Random | None = None,
     ) -> None:
         if not idioms:
@@ -202,11 +348,20 @@ class IdiomGameSkill:
         self._by_first_py: dict[str, list[IdiomEntry]] = defaultdict(list)
         for entry in idioms:
             self._by_first_py[entry.first_py].append(entry)
+        self._default_robot_difficulty = normalize_robot_difficulty(robot_difficulty)
+        self._bot_by_first_py_by_difficulty: dict[str, dict[str, list[IdiomEntry]]] = {}
+        for difficulty in _ROBOT_REPLY_LIMITS:
+            self._bot_by_first_py_by_difficulty[difficulty] = self._build_reply_index(
+                self._select_robot_reply_pool(difficulty, robot_reply_limit)
+            )
         self._known_words = sorted(self._by_word, key=len, reverse=True)
         opening_pool_words = tuple(opening_words or _DEFAULT_OPENING_WORDS)
         self._opening_pool = [self._by_word[word] for word in opening_pool_words if word in self._by_word]
         if not self._opening_pool:
             self._opening_pool = self._idioms[: min(64, len(self._idioms))]
+        self._judge_unknown_idiom = judge_unknown_idiom
+        self._judge_min_confidence = max(0.0, min(1.0, float(judge_min_confidence)))
+        self._target_user_turns = max(0, int(target_user_turns))
         self._rng = rng or random.SystemRandom()
         self._store = store or InMemoryIdiomGameStore()
 
@@ -214,15 +369,23 @@ class IdiomGameSkill:
     def store(self) -> InMemoryIdiomGameStore:
         return self._store
 
-    def start(self, device_id: str) -> str:
+    def start(self, device_id: str, text: str | None = None) -> str:
         opening = self._rng.choice(self._opening_pool)
+        requested_difficulty = detect_idiom_difficulty(text or "")
+        robot_difficulty = requested_difficulty or self._default_robot_difficulty
         self._store.save(
             device_id,
             IdiomGameState(
                 expected_py=opening.last_py,
                 used_words={opening.word},
+                robot_difficulty=robot_difficulty,
             ),
         )
+        if requested_difficulty is not None:
+            return (
+                f"好呀，我们玩成语接龙，已切换到{robot_difficulty_label(robot_difficulty)}模式。"
+                f"小机仔先来：{opening.word}。轮到你啦，要接“{opening.last_py}”。"
+            )
         return f"好呀，我们玩成语接龙。小机仔先来：{opening.word}。轮到你啦，要接“{opening.last_py}”。"
 
     def exit(self, device_id: str) -> str:
@@ -232,7 +395,20 @@ class IdiomGameSkill:
     def handle(self, device_id: str, text: str) -> str:
         state = self._store.get(device_id)
         if state is None:
-            return self.start(device_id)
+            return self.start(device_id, text)
+
+        requested_difficulty = detect_idiom_difficulty(text)
+        if requested_difficulty is not None:
+            self._store.save(
+                device_id,
+                IdiomGameState(
+                    expected_py=state.expected_py,
+                    used_words=set(state.used_words),
+                    valid_user_turns=state.valid_user_turns,
+                    robot_difficulty=requested_difficulty,
+                ),
+            )
+            return f"已切换到{robot_difficulty_label(requested_difficulty)}模式。轮到你啦，要接“{state.expected_py}”。"
 
         cleaned = clean_idiom_text(text)
         user_entry = self._extract_user_entry(cleaned, expected_py=state.expected_py)
@@ -245,7 +421,12 @@ class IdiomGameSkill:
 
         used_words = set(state.used_words)
         used_words.add(user_entry.word)
-        reply_entry = self._find_reply(user_entry.last_py, used_words)
+        valid_user_turns = state.valid_user_turns + 1
+        if self._target_user_turns and valid_user_turns >= self._target_user_turns:
+            self._store.clear(device_id)
+            return f"你已经连续接上{valid_user_turns}轮啦，这局你赢。"
+
+        reply_entry = self._find_reply(user_entry.last_py, used_words, state.robot_difficulty)
         if reply_entry is None:
             self._store.clear(device_id)
             return f"你接上了“{user_entry.word}”，小机仔暂时接不上啦，这局你赢。"
@@ -256,6 +437,8 @@ class IdiomGameSkill:
             IdiomGameState(
                 expected_py=reply_entry.last_py,
                 used_words=used_words,
+                valid_user_turns=valid_user_turns,
+                robot_difficulty=state.robot_difficulty,
             ),
         )
         return f"小机仔接：{reply_entry.word}。轮到你啦，要接“{reply_entry.last_py}”。"
@@ -269,7 +452,11 @@ class IdiomGameSkill:
         if expected_entry is not None:
             return expected_entry
 
-        return self._find_entry_in_text(cleaned_text, (self._by_word[word] for word in self._known_words))
+        known_entry = self._find_entry_in_text(cleaned_text, (self._by_word[word] for word in self._known_words))
+        if known_entry is not None:
+            return known_entry
+
+        return self._judge_unknown_entry(cleaned_text, expected_py=expected_py)
 
     @staticmethod
     def _find_entry_in_text(cleaned_text: str, entries: Iterable[IdiomEntry]) -> IdiomEntry | None:
@@ -283,8 +470,42 @@ class IdiomGameSkill:
                 best = candidate
         return best[2] if best is not None else None
 
-    def _find_reply(self, first_py: str, used_words: set[str]) -> IdiomEntry | None:
-        for entry in self._by_first_py.get(first_py, []):
+    def _find_reply(self, first_py: str, used_words: set[str], difficulty: str) -> IdiomEntry | None:
+        reply_index = self._bot_by_first_py_by_difficulty.get(
+            normalize_robot_difficulty(difficulty),
+            self._bot_by_first_py_by_difficulty[self._default_robot_difficulty],
+        )
+        for entry in reply_index.get(first_py, []):
             if entry.word not in used_words:
                 return entry
         return None
+
+    def _select_robot_reply_pool(self, difficulty: str, reply_limit: int | None) -> list[IdiomEntry]:
+        if reply_limit is None:
+            normalized_difficulty = normalize_robot_difficulty(difficulty)
+            reply_limit = _ROBOT_REPLY_LIMITS.get(normalized_difficulty, _ROBOT_REPLY_LIMITS["normal"])
+        if reply_limit is None:
+            return self._idioms
+        return self._idioms[: max(0, int(reply_limit))]
+
+    @staticmethod
+    def _build_reply_index(entries: Iterable[IdiomEntry]) -> dict[str, list[IdiomEntry]]:
+        reply_index: dict[str, list[IdiomEntry]] = defaultdict(list)
+        for entry in entries:
+            reply_index[entry.first_py].append(entry)
+        return reply_index
+
+    def _judge_unknown_entry(self, cleaned_text: str, *, expected_py: str) -> IdiomEntry | None:
+        if not cleaned_text or self._judge_unknown_idiom is None:
+            return None
+        decision = self._judge_unknown_idiom(cleaned_text, expected_py)
+        if decision is None or not decision.is_idiom:
+            return None
+        if float(decision.confidence) < self._judge_min_confidence:
+            return None
+        word = clean_idiom_text(decision.word)
+        first_py = normalize_pinyin(decision.first_py)
+        last_py = normalize_pinyin(decision.last_py)
+        if not word or not first_py or not last_py:
+            return None
+        return IdiomEntry(word=word, first_py=first_py, last_py=last_py)

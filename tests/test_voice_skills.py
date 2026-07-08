@@ -94,6 +94,161 @@ class VoiceSkillRouterTests(unittest.TestCase):
         self.assertEqual(continued.skill_name, "idiom_game")
         self.assertIn("小机仔接：国泰民安", continued.answer_text)
 
+    def test_idiom_game_accepts_llm_judged_idiom_when_local_lexicon_misses(self) -> None:
+        from src.voice_skills.idiom_game import (
+            IdiomEntry,
+            IdiomGameSkill,
+            IdiomJudgeDecision,
+            InMemoryIdiomGameStore,
+        )
+        from src.voice_skills.router import SkillRouter
+
+        calls: list[tuple[str, str]] = []
+
+        def _judge_unknown(text: str, expected_py: str) -> IdiomJudgeDecision:
+            calls.append((text, expected_py))
+            return IdiomJudgeDecision("精忠报国", "jing", "guo", confidence=0.95)
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                [
+                    IdiomEntry("画龙点睛", "hua", "jing"),
+                    IdiomEntry("国泰民安", "guo", "an"),
+                ],
+                store=store,
+                opening_words=("画龙点睛",),
+                judge_unknown_idiom=_judge_unknown,
+                robot_difficulty="full",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        continued = router.route(device_id="esp-1", text="我接精中报国")
+
+        self.assertEqual(calls, [("精中报国", "jing")])
+        self.assertEqual(continued.skill_name, "idiom_game")
+        self.assertIn("小机仔接：国泰民安", continued.answer_text)
+
+    def test_idiom_game_start_can_set_difficulty_from_voice_request(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
+        from src.voice_skills.router import SkillRouter
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+
+        result = router.route(device_id="esp-1", text="我想玩成语接龙困难模式")
+
+        state = store.get("esp-1")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.robot_difficulty, "hard")
+        self.assertIn("困难模式", result.answer_text)
+        self.assertIsNone(result.audio_plan)
+
+    def test_idiom_game_can_switch_difficulty_during_active_round(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
+        from src.voice_skills.router import SkillRouter
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(load_default_idioms(), store=store, opening_words=("画龙点睛",)),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        result = router.route(device_id="esp-1", text="切换到简单模式")
+
+        state = store.get("esp-1")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.robot_difficulty, "easy")
+        self.assertEqual(state.expected_py, "jing")
+        self.assertIn("已切换到简单模式", result.answer_text)
+        self.assertNotIn("词库", result.answer_text)
+
+    def test_idiom_game_difficulty_switch_changes_reply_pool(self) -> None:
+        from src.voice_skills.idiom_game import IdiomEntry, IdiomGameSkill, InMemoryIdiomGameStore
+        from src.voice_skills.router import SkillRouter
+
+        filler = [IdiomEntry(f"占位{i:03d}", "zhan", "zhan") for i in range(498)]
+        idioms = [
+            IdiomEntry("画龙点睛", "hua", "jing"),
+            IdiomEntry("精忠报国", "jing", "guo"),
+            *filler,
+            IdiomEntry("国泰民安", "guo", "an"),
+        ]
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                idioms,
+                store=store,
+                opening_words=("画龙点睛",),
+                robot_difficulty="easy",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+        router.route(device_id="esp-1", text="切换到普通模式")
+
+        result = router.route(device_id="esp-1", text="精忠报国")
+
+        self.assertIn("小机仔接：国泰民安", result.answer_text)
+
+    def test_idiom_game_limited_robot_pool_lets_user_win(self) -> None:
+        from src.voice_skills.idiom_game import IdiomEntry, IdiomGameSkill, InMemoryIdiomGameStore
+        from src.voice_skills.router import SkillRouter
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                [
+                    IdiomEntry("画龙点睛", "hua", "jing"),
+                    IdiomEntry("精忠报国", "jing", "guo"),
+                    IdiomEntry("国泰民安", "guo", "an"),
+                ],
+                store=store,
+                opening_words=("画龙点睛",),
+                robot_reply_limit=1,
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        result = router.route(device_id="esp-1", text="精忠报国")
+
+        self.assertIn("这局你赢", result.answer_text)
+        self.assertFalse(store.is_active("esp-1"))
+
+    def test_idiom_game_target_user_turns_can_end_as_user_win(self) -> None:
+        from src.voice_skills.idiom_game import IdiomEntry, IdiomGameSkill, InMemoryIdiomGameStore
+        from src.voice_skills.router import SkillRouter
+
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                [
+                    IdiomEntry("画龙点睛", "hua", "jing"),
+                    IdiomEntry("精忠报国", "jing", "guo"),
+                    IdiomEntry("国泰民安", "guo", "an"),
+                ],
+                store=store,
+                opening_words=("画龙点睛",),
+                target_user_turns=1,
+                robot_difficulty="full",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        result = router.route(device_id="esp-1", text="精忠报国")
+
+        self.assertIn("连续接上1轮", result.answer_text)
+        self.assertIn("这局你赢", result.answer_text)
+        self.assertFalse(store.is_active("esp-1"))
+
     def test_weather_and_translation_are_explicit_placeholders(self) -> None:
         from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
         from src.voice_skills.router import SkillRouter

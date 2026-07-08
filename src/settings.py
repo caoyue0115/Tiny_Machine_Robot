@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     default_voice_mode: str = "companion"
     enabled_skills: str = "idiom_game,companion_chat"
     idiom_game_ttl_seconds: int = 900
+    idiom_game_robot_difficulty: str = "normal"
+    idiom_game_target_user_turns: int = 6
+    idiom_game_llm_judge_enabled: bool = False
+    idiom_game_llm_judge_min_confidence: float = 0.8
     max_upload_mb: int = 3
     max_audio_seconds: int = 8
     chunk_size: int = 300
