@@ -1,0 +1,33 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Tiny Coffee Machine uses the 16MB Flash + 8MB PSRAM low-cost board.
+# Its audio PCB routes microphone DIN on GPIO15 and does not use GPIO48.
+CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M=y
+CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0=y
+
+# Wake word requires the Xiaoming Tongxue WakeNet model in the model partition.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9_XIAOMINGTONGXUE_TTS2=y
+
+# esp-wifi-connect invokes C++ callbacks and scan handling from the system
+# event task. The ESP-IDF default stack overflows during station connect.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# [A] 下行音频放一半硬断排查:关闭 WiFi 接收方向的 AMPDU 聚合。
+# 现象:待机时串口持续刷 wifi:[ADDBA]RX DELBA reason:37(block-ack 会话被反复拆),
+# 交互放答复时下行 TCP 卡数秒 -> esp_http_client 读超时 -> audio_stream_read_failed。
+# 对 24kbps 音频流而言接收聚合几乎无收益,关掉可消除 BA 反复建/拆的抖动。
+# 不影响 WiFi 省电(MIN_MODEM 保持)。要回滚删掉本行即可。
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
