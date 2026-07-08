@@ -9,8 +9,12 @@ from src.settings import Settings
 def test_tiny_defaults_identify_public_project_and_realtime_chain() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.project_name == "Tiny Coffee Machine"
+    assert settings.project_name == "Tiny Machine Voice Pet"
     assert settings.queue_name == "tiny_coffee_tasks"
+    assert settings.assistant_name == "小机仔"
+    assert settings.default_voice_mode == "companion"
+    assert settings.enabled_skills == "idiom_game,companion_chat"
+    assert settings.idiom_game_ttl_seconds == 900
     assert settings.llm_provider == "dashscope"
     assert settings.llm_model == "qwen3.5-flash-2026-02-23"
     assert settings.asr_provider == "volcengine"
@@ -21,7 +25,7 @@ def test_tiny_defaults_identify_public_project_and_realtime_chain() -> None:
     assert settings.realtime_tts_model == "qwen3-tts-flash-realtime-2025-11-27"
     assert (
         settings.tts_instructions
-        == "请使用明亮、亲切、有一点活泼感的中文声音，语速自然，适合咖啡小问答播报。"
+        == "请使用明亮、亲切、有一点活泼感的中文声音，语速自然，适合小机仔语音桌宠播报。"
     )
     assert Settings.model_config.get("env_file") == ".env"
     assert Settings.model_config.get("extra") == "ignore"

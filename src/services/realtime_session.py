@@ -21,6 +21,7 @@ from src.providers.tts import synthesize_audio
 from src.rag.retriever import is_coffee_question, retrieve_references
 from src.settings import settings
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
+from src.voice_skills.router import route_voice_skill
 
 
 ANSWER_MODE_SHORT = "short"
@@ -113,8 +114,15 @@ def normalize_coffee_asr_text(text: str) -> tuple[str, list[str]]:
     return normalized, applied_rules
 
 
+def normalize_voice_text(text: str) -> tuple[str, list[str]]:
+    raw_text = str(text or "")
+    normalized = " ".join(raw_text.split()).strip()
+    applied_rules = ["trim_whitespace"] if normalized != raw_text else []
+    return normalized, applied_rules
+
+
 def _apply_asr_normalization(trace: dict, raw_text: str) -> str:
-    normalized_text, applied_rules = normalize_coffee_asr_text(raw_text)
+    normalized_text, applied_rules = normalize_voice_text(raw_text)
     trace["asr_raw_text"] = raw_text
     trace["asr_normalized_text"] = normalized_text
     trace["asr_normalization_applied"] = bool(applied_rules)
@@ -354,18 +362,21 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
             trace=updated["trace"],
         )
 
-    retrieval_started = time.perf_counter()
+    skill_started = time.perf_counter()
     try:
-        references, top_score = retrieve_references(question_text, top_k=settings.top_k)
-    except FileNotFoundError as exc:
-        store.mark_failed(session_id, "retrieval_unavailable", str(exc) or "Retrieval unavailable")
-        store.fail_audio(session_id, "retrieval_unavailable")
-        return
+        skill_result = route_voice_skill(
+            device_id=str(updated.get("device_id") or ""),
+            text=question_text,
+            answer_mode=answer_mode,
+            trace=updated["trace"],
+        )
     except Exception as exc:
-        store.mark_failed(session_id, "retrieval_failed", str(exc) or "Retrieval failed")
-        store.fail_audio(session_id, "retrieval_failed")
+        store.mark_failed(session_id, "skill_route_failed", str(exc) or "Skill route failed")
+        store.fail_audio(session_id, "skill_route_failed")
         return
-    updated["trace"]["retrieval_ms"] = _elapsed_ms(retrieval_started)
+    updated["trace"].update(skill_result.trace)
+    updated["trace"]["skill_route_ms"] = _elapsed_ms(skill_started)
+    updated["trace"]["retrieval_ms"] = updated["trace"]["skill_route_ms"]
     if stream_to_session_start_abs_ms is not None:
         _set_abs_trace(
             updated["trace"],
@@ -373,89 +384,63 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
             stream_to_session_start_abs_ms,
             _elapsed_ms(overall_started),
         )
-    updated["trace"]["retrieval_top_score"] = top_score
-    threshold = settings.min_top_score if is_coffee_question(question_text) else settings.min_top_score_no_keyword
-    is_reject = (not references) or top_score < threshold
     store.update_session(session_id, step="llm", trace=updated["trace"])
-    if is_reject:
-        answer_text = COFFEE_RETRY_TEXT
-        updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
-        _set_abs_trace(
-            updated["trace"],
-            "first_llm_chunk_abs_ms",
-            stream_to_session_start_abs_ms,
-            updated["trace"]["first_llm_chunk_ms"],
-        )
-    else:
-        llm_references = references
-        prepared_tts_session: PreparedRealtimeTtsSession | None = None
-        if realtime_tts_health():
-            llm_references = _compact_references_for_realtime_llm(references)
-            if settings.realtime_tts_warmup_enabled:
-                warmup_started = time.perf_counter()
-                try:
-                    prepared_tts_session = warmup_realtime_tts_session()
-                    updated["trace"]["tts_warmup_failed"] = False
-                except Exception:
-                    prepared_tts_session = None
-                    updated["trace"]["tts_warmup_failed"] = True
-                updated["trace"]["tts_warmup_ms"] = _elapsed_ms(warmup_started)
+    is_reject = False
+    prepared_tts_session: PreparedRealtimeTtsSession | None = None
+    if realtime_tts_health() and settings.realtime_tts_warmup_enabled:
+        warmup_started = time.perf_counter()
         try:
-            llm_stream: Iterable[str] = _stream_answer_text_for_mode(
-                question_text,
-                llm_references,
-                answer_mode,
-            )
+            prepared_tts_session = warmup_realtime_tts_session()
+            updated["trace"]["tts_warmup_failed"] = False
+        except Exception:
+            prepared_tts_session = None
+            updated["trace"]["tts_warmup_failed"] = True
+        updated["trace"]["tts_warmup_ms"] = _elapsed_ms(warmup_started)
+    answer_segments: list[str] = []
+    answer_text = str(skill_result.answer_text or "").strip()
+    llm_stream: Iterable[str] = skill_result.answer_stream or (iter([answer_text]) if answer_text else iter(()))
+    if not realtime_tts_health():
+        answer_parts: list[str] = []
+        pending_answer = ""
+        try:
+            for chunk in llm_stream:
+                if not chunk:
+                    continue
+                if updated["trace"]["first_llm_chunk_ms"] is None:
+                    updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
+                    _set_abs_trace(
+                        updated["trace"],
+                        "first_llm_chunk_abs_ms",
+                        stream_to_session_start_abs_ms,
+                        updated["trace"]["first_llm_chunk_ms"],
+                    )
+                answer_parts.append(chunk)
+                pending_answer += "".join(chunk.split())
+                ready_segments, pending_answer = _split_stream_buffer(
+                    pending_answer,
+                    min_chars=settings.realtime_tts_min_chars,
+                    max_chars=settings.realtime_tts_max_chars,
+                )
+                answer_segments.extend(segment for segment in ready_segments if segment)
         except Exception as exc:
             store.mark_failed(session_id, "llm_request_failed", str(exc) or "LLM failed")
             store.fail_audio(session_id, "llm_request_failed")
-            if prepared_tts_session is not None:
-                prepared_tts_session.close()
             return
-        answer_segments: list[str] = []
-        answer_text = ""
-        if not realtime_tts_health():
-            answer_parts: list[str] = []
-            pending_answer = ""
-            try:
-                for chunk in llm_stream:
-                    if not chunk:
-                        continue
-                    if updated["trace"]["first_llm_chunk_ms"] is None:
-                        updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
-                        _set_abs_trace(
-                            updated["trace"],
-                            "first_llm_chunk_abs_ms",
-                            stream_to_session_start_abs_ms,
-                            updated["trace"]["first_llm_chunk_ms"],
-                        )
-                    answer_parts.append(chunk)
-                    pending_answer += "".join(chunk.split())
-                    ready_segments, pending_answer = _split_stream_buffer(
-                        pending_answer,
-                        min_chars=settings.realtime_tts_min_chars,
-                        max_chars=settings.realtime_tts_max_chars,
-                    )
-                    answer_segments.extend(segment for segment in ready_segments if segment)
-            except Exception as exc:
-                store.mark_failed(session_id, "llm_request_failed", str(exc) or "LLM failed")
-                store.fail_audio(session_id, "llm_request_failed")
-                return
-            if pending_answer:
-                answer_segments.extend(
-                    segment
-                    for segment in split_realtime_answer_text(
-                        pending_answer,
-                        min_chars=settings.realtime_tts_min_chars,
-                        max_chars=settings.realtime_tts_max_chars,
-                    )
-                    if segment
+        if pending_answer:
+            answer_segments.extend(
+                segment
+                for segment in split_realtime_answer_text(
+                    pending_answer,
+                    min_chars=settings.realtime_tts_min_chars,
+                    max_chars=settings.realtime_tts_max_chars,
                 )
-            answer_text = "".join(answer_parts).strip()
-            if not answer_text:
-                store.mark_failed(session_id, "llm_empty_text", "LLM returned empty text")
-                store.fail_audio(session_id, "llm_empty_text")
-                return
+                if segment
+            )
+        answer_text = "".join(answer_parts).strip()
+        if not answer_text:
+            store.mark_failed(session_id, "llm_empty_text", "LLM returned empty text")
+            store.fail_audio(session_id, "llm_empty_text")
+            return
     store.update_session(
         session_id,
         step="tts",

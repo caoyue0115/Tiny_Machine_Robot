@@ -17,6 +17,12 @@ TINY_COFFEE_SYSTEM_PROMPT = (
     "只能依据给定咖啡资料证据作答；资料不足就说明不确定，并引导用户换一个咖啡问题。"
     "不要编造品牌、价格、门店或活动信息，也不要编造库存或优惠信息。"
 )
+COMPANION_SYSTEM_PROMPT = (
+    "你是{assistant_name}，一个可爱的语音桌宠。"
+    "请用中文口语化短句陪用户聊天，语气亲切、轻快，但不要装作能看到现实环境。"
+    "遇到天气、实时新闻、价格、库存、门店、活动等实时事实，不要编造，说明这个技能还没接好。"
+    "默认回答适合语音播报，控制在1到3句话。"
+)
 
 
 def llm_health() -> bool:
@@ -76,6 +82,23 @@ def _build_messages(
     ]
 
 
+def _build_companion_messages(question_text: str, *, answer_mode: str | None = None) -> list[dict[str, str]]:
+    system_prompt = COMPANION_SYSTEM_PROMPT.format(assistant_name=settings.assistant_name)
+    if _normalize_answer_mode(answer_mode) == ANSWER_MODE_SHORT:
+        system_prompt += "短答时尽量1到2句，总字数不超过70字。"
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"用户说：{question_text}\n"
+                "回答要求：直接回应用户，适合语音播报。"
+                "如果问题需要未接入的外部能力，就友好说明暂时还没接好。"
+            ),
+        },
+    ]
+
+
 def _max_tokens_for_answer_mode(answer_mode: str | None) -> int:
     if _normalize_answer_mode(answer_mode) == ANSWER_MODE_SHORT:
         return min(settings.llm_max_tokens, SHORT_ANSWER_MAX_TOKENS)
@@ -112,6 +135,22 @@ def stream_answer_text(
         temperature=settings.llm_temperature,
         max_tokens=_max_tokens_for_answer_mode(answer_mode),
         messages=_build_messages(question_text, references, answer_mode=answer_mode),
+        stream=True,
+        extra_body={"enable_thinking": False},
+    )
+    yield from _iter_chunk_text(response_stream)
+
+
+def stream_companion_answer_text(question_text: str, *, answer_mode: str | None = None) -> Iterator[str]:
+    if not llm_health():
+        yield f"{settings.assistant_name}在呢，先陪你聊一会儿。"
+        return
+    client = _build_client()
+    response_stream = client.chat.completions.create(
+        model=settings.llm_model,
+        temperature=settings.llm_temperature,
+        max_tokens=_max_tokens_for_answer_mode(answer_mode),
+        messages=_build_companion_messages(question_text, answer_mode=answer_mode),
         stream=True,
         extra_body={"enable_thinking": False},
     )

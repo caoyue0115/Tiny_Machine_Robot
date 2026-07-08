@@ -1,11 +1,11 @@
-# Tiny Coffee Machine
+# Tiny Machine Voice Pet
 
-`Tiny Coffee Machine` / `小机仔` is an ESP32-S3 voice Q&A coffee companion.
+`Tiny Machine Voice Pet` / `小机仔` is an ESP32-S3 voice desk-pet backend base.
 
-Phase 1 runs the realtime Opus voice chain:
+Phase 1 keeps the realtime Opus voice chain and routes ASR text through backend skills:
 
 ```text
-小明同学 wake word -> Opus uplink -> Volcengine ASR -> coffee RAG -> Qwen 3.5 Flash -> Qwen realtime TTS -> device playback
+小明同学 wake word -> Opus uplink -> ASR -> SkillRouter -> realtime TTS -> device playback
 ```
 
 ## Phase 1 Scope
@@ -13,7 +13,9 @@ Phase 1 runs the realtime Opus voice chain:
 - ESP32-S3 16MB Flash + 8MB PSRAM voice board.
 - Guangzhou cloud entry: `tiny.praystack.top`.
 - Realtime Opus endpoint: `/api/v5/realtime/opus-stream`.
-- General coffee knowledge base.
+- Default companion chat persona: `小机仔`.
+- First stateful skill: idiom chain game.
+- Coffee and Buddhism knowledge assets are retained for future RAG skills.
 - OTA code retained but inactive.
 
 ## Local Cloud
@@ -29,6 +31,8 @@ docker compose up --build
 $env:PYTHONPATH='.'
 python scripts/ingest_coffee.py
 ```
+
+Coffee RAG is no longer the default realtime answer path in phase 1.
 
 ## Firmware
 

@@ -29,7 +29,7 @@ from src.providers.realtime_asr import (
     create_realtime_asr_session,
 )
 from src.services.realtime_session import (
-    normalize_coffee_asr_text,
+    normalize_voice_text,
     start_realtime_session,
     start_realtime_session_from_question,
 )
@@ -898,7 +898,7 @@ async def stream_opus_realtime_session(
     asr_normalization_applied = None
     asr_normalization_rules = None
     if asr_raw_text:
-        asr_normalized_text, asr_normalization_rules = normalize_coffee_asr_text(asr_raw_text)
+        asr_normalized_text, asr_normalization_rules = normalize_voice_text(asr_raw_text)
         asr_normalization_applied = bool(asr_normalization_rules)
 
     done_payload = {
@@ -1000,13 +1000,14 @@ async def stream_opus_realtime_session(
                 "asr_final_abs_ms": asr_final_abs_ms,
             }
         )
-        store.update_session(session["session_id"], trace=session_trace, question_text=asr_result.text)
+        session_question_text = asr_normalized_text if asr_normalized_text is not None else asr_result.text
+        store.update_session(session["session_id"], trace=session_trace, question_text=session_question_text)
         if asr_fallback_used:
             _log_asr_fallback(session["session_id"])
         start_realtime_session_from_question(
             store,
             session["session_id"],
-            asr_result.text,
+            session_question_text,
             answer_mode=answer_mode,
         )
         done_payload.update(
