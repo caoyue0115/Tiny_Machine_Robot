@@ -98,7 +98,7 @@ class SkillRouter:
                 return self._text_result(
                     "idiom_game",
                     answer_text,
-                    base_trace,
+                    self._idiom_trace(base_trace),
                     audio_plan=build_idiom_audio_plan(answer_text),
                     end_skill_state=True,
                 )
@@ -106,7 +106,7 @@ class SkillRouter:
             return self._text_result(
                 "idiom_game",
                 answer_text,
-                base_trace,
+                self._idiom_trace(base_trace),
                 audio_plan=build_idiom_audio_plan(answer_text),
             )
 
@@ -115,7 +115,7 @@ class SkillRouter:
             return self._text_result(
                 "idiom_game",
                 answer_text,
-                base_trace,
+                self._idiom_trace(base_trace),
                 audio_plan=build_idiom_audio_plan(answer_text),
             )
 
@@ -160,6 +160,11 @@ class SkillRouter:
     def _trace(trace: dict, skill_name: str) -> dict:
         result = dict(trace)
         result["skill_name"] = skill_name
+        return result
+
+    def _idiom_trace(self, trace: dict) -> dict:
+        result = dict(trace)
+        result.update(self._idiom_skill.last_trace())
         return result
 
 

@@ -364,15 +364,25 @@ class IdiomGameSkill:
         self._target_user_turns = max(0, int(target_user_turns))
         self._rng = rng or random.SystemRandom()
         self._store = store or InMemoryIdiomGameStore()
+        self._last_trace: dict[str, object] = {}
 
     @property
     def store(self) -> InMemoryIdiomGameStore:
         return self._store
 
+    def last_trace(self) -> dict[str, object]:
+        return dict(self._last_trace)
+
     def start(self, device_id: str, text: str | None = None) -> str:
         opening = self._rng.choice(self._opening_pool)
         requested_difficulty = detect_idiom_difficulty(text or "")
         robot_difficulty = requested_difficulty or self._default_robot_difficulty
+        self._last_trace = {
+            "idiom_event": "start",
+            "idiom_expected_py": opening.last_py,
+            "idiom_robot_difficulty": robot_difficulty,
+            "idiom_llm_judge_used": False,
+        }
         self._store.save(
             device_id,
             IdiomGameState(
@@ -390,15 +400,28 @@ class IdiomGameSkill:
 
     def exit(self, device_id: str) -> str:
         self._store.clear(device_id)
+        self._last_trace = {"idiom_event": "exit", "idiom_llm_judge_used": False}
         return "这局先到这里，小机仔把小本本合上啦。"
 
     def handle(self, device_id: str, text: str) -> str:
         state = self._store.get(device_id)
         if state is None:
             return self.start(device_id, text)
+        self._last_trace = {
+            "idiom_event": "turn",
+            "idiom_expected_py": state.expected_py,
+            "idiom_robot_difficulty": state.robot_difficulty,
+            "idiom_llm_judge_used": False,
+        }
 
         requested_difficulty = detect_idiom_difficulty(text)
         if requested_difficulty is not None:
+            self._last_trace.update(
+                {
+                    "idiom_event": "difficulty_switch",
+                    "idiom_robot_difficulty": requested_difficulty,
+                }
+            )
             self._store.save(
                 device_id,
                 IdiomGameState(
@@ -413,10 +436,14 @@ class IdiomGameSkill:
         cleaned = clean_idiom_text(text)
         user_entry = self._extract_user_entry(cleaned, expected_py=state.expected_py)
         if user_entry is None:
+            self._last_trace["idiom_user_match_source"] = "none"
+            self._last_trace["idiom_result"] = "unknown_idiom"
             return "这个我还没在成语词库里找到。你可以换一个四字成语再接。"
         if user_entry.word in state.used_words:
+            self._last_trace["idiom_result"] = "repeated_word"
             return f"“{user_entry.word}”刚刚用过啦，成语接龙不能重复哦。"
         if user_entry.first_py != state.expected_py:
+            self._last_trace["idiom_result"] = "wrong_prefix"
             return f"要接“{state.expected_py}”开头的成语哦。你可以再来一次。"
 
         used_words = set(state.used_words)
@@ -424,14 +451,36 @@ class IdiomGameSkill:
         valid_user_turns = state.valid_user_turns + 1
         if self._target_user_turns and valid_user_turns >= self._target_user_turns:
             self._store.clear(device_id)
+            self._last_trace.update(
+                {
+                    "idiom_result": "user_win_target_turns",
+                    "idiom_valid_user_turns": valid_user_turns,
+                }
+            )
             return f"你已经连续接上{valid_user_turns}轮啦，这局你赢。"
 
         reply_entry = self._find_reply(user_entry.last_py, used_words, state.robot_difficulty)
         if reply_entry is None:
             self._store.clear(device_id)
+            self._last_trace.update(
+                {
+                    "idiom_result": "user_win_robot_no_reply",
+                    "idiom_valid_user_turns": valid_user_turns,
+                }
+            )
             return f"你接上了“{user_entry.word}”，小机仔暂时接不上啦，这局你赢。"
 
         used_words.add(reply_entry.word)
+        self._last_trace.update(
+            {
+                "idiom_result": "robot_replied",
+                "idiom_valid_user_turns": valid_user_turns,
+                "idiom_robot_reply_word": reply_entry.word,
+                "idiom_robot_reply_first_py": reply_entry.first_py,
+                "idiom_robot_reply_last_py": reply_entry.last_py,
+                "idiom_next_expected_py": reply_entry.last_py,
+            }
+        )
         self._store.save(
             device_id,
             IdiomGameState(
@@ -446,17 +495,30 @@ class IdiomGameSkill:
     def _extract_user_entry(self, cleaned_text: str, *, expected_py: str) -> IdiomEntry | None:
         exact = self._by_word.get(cleaned_text)
         if exact is not None:
+            self._record_user_entry_trace(exact, "exact")
             return exact
 
         expected_entry = self._find_entry_in_text(cleaned_text, self._by_first_py.get(expected_py, []))
         if expected_entry is not None:
+            self._record_user_entry_trace(expected_entry, "expected_text")
             return expected_entry
 
         known_entry = self._find_entry_in_text(cleaned_text, (self._by_word[word] for word in self._known_words))
         if known_entry is not None:
+            self._record_user_entry_trace(known_entry, "known_text")
             return known_entry
 
         return self._judge_unknown_entry(cleaned_text, expected_py=expected_py)
+
+    def _record_user_entry_trace(self, entry: IdiomEntry, source: str) -> None:
+        self._last_trace.update(
+            {
+                "idiom_user_match_source": source,
+                "idiom_user_word": entry.word,
+                "idiom_user_first_py": entry.first_py,
+                "idiom_user_last_py": entry.last_py,
+            }
+        )
 
     @staticmethod
     def _find_entry_in_text(cleaned_text: str, entries: Iterable[IdiomEntry]) -> IdiomEntry | None:
@@ -498,7 +560,10 @@ class IdiomGameSkill:
     def _judge_unknown_entry(self, cleaned_text: str, *, expected_py: str) -> IdiomEntry | None:
         if not cleaned_text or self._judge_unknown_idiom is None:
             return None
+        self._last_trace["idiom_llm_judge_used"] = True
         decision = self._judge_unknown_idiom(cleaned_text, expected_py)
+        if decision is not None:
+            self._last_trace["idiom_llm_judge_confidence"] = float(decision.confidence)
         if decision is None or not decision.is_idiom:
             return None
         if float(decision.confidence) < self._judge_min_confidence:
@@ -508,4 +573,6 @@ class IdiomGameSkill:
         last_py = normalize_pinyin(decision.last_py)
         if not word or not first_py or not last_py:
             return None
-        return IdiomEntry(word=word, first_py=first_py, last_py=last_py)
+        entry = IdiomEntry(word=word, first_py=first_py, last_py=last_py)
+        self._record_user_entry_trace(entry, "llm_judge")
+        return entry

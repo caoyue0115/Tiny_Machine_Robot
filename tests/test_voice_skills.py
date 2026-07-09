@@ -131,6 +131,71 @@ class VoiceSkillRouterTests(unittest.TestCase):
         self.assertEqual(continued.skill_name, "idiom_game")
         self.assertIn("小机仔接：国泰民安", continued.answer_text)
 
+    def test_idiom_game_trace_marks_llm_judge_fallback_for_cost_tracking(self) -> None:
+        from src.voice_skills.idiom_game import (
+            IdiomEntry,
+            IdiomGameSkill,
+            IdiomJudgeDecision,
+            InMemoryIdiomGameStore,
+        )
+        from src.voice_skills.router import SkillRouter
+
+        def _judge_unknown(text: str, expected_py: str) -> IdiomJudgeDecision:
+            self.assertEqual(text, "精中报国")
+            self.assertEqual(expected_py, "jing")
+            return IdiomJudgeDecision("精忠报国", "jing", "guo", confidence=0.95)
+
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                [
+                    IdiomEntry("画龙点睛", "hua", "jing"),
+                    IdiomEntry("国泰民安", "guo", "an"),
+                ],
+                store=InMemoryIdiomGameStore(ttl_seconds=900),
+                opening_words=("画龙点睛",),
+                judge_unknown_idiom=_judge_unknown,
+                robot_difficulty="full",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        result = router.route(device_id="esp-1", text="我接精中报国")
+
+        self.assertEqual(result.trace["idiom_user_match_source"], "llm_judge")
+        self.assertEqual(result.trace["idiom_user_word"], "精忠报国")
+        self.assertEqual(result.trace["idiom_expected_py"], "jing")
+        self.assertTrue(result.trace["idiom_llm_judge_used"])
+        self.assertEqual(result.trace["idiom_llm_judge_confidence"], 0.95)
+
+    def test_idiom_game_trace_marks_local_reply_without_llm_cost(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
+        from src.voice_skills.router import SkillRouter
+
+        def _judge_unknown(text: str, expected_py: str):
+            raise AssertionError(f"LLM judge should not run for local match: {text}/{expected_py}")
+
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                load_default_idioms(),
+                store=InMemoryIdiomGameStore(ttl_seconds=900),
+                opening_words=("画龙点睛",),
+                judge_unknown_idiom=_judge_unknown,
+                robot_difficulty="full",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+
+        result = router.route(device_id="esp-1", text="精卫填海")
+
+        self.assertEqual(result.trace["idiom_user_match_source"], "exact")
+        self.assertEqual(result.trace["idiom_user_word"], "精卫填海")
+        self.assertFalse(result.trace["idiom_llm_judge_used"])
+        self.assertEqual(result.trace["idiom_result"], "robot_replied")
+        self.assertEqual(result.trace["idiom_robot_reply_word"], "海阔天空")
+        self.assertEqual(result.trace["idiom_next_expected_py"], "kong")
+
     def test_idiom_game_start_can_set_difficulty_from_voice_request(self) -> None:
         from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
         from src.voice_skills.router import SkillRouter
