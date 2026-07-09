@@ -17,7 +17,7 @@ def test_tiny_defaults_identify_public_project_and_realtime_chain() -> None:
     assert settings.idiom_game_ttl_seconds == 900
     assert settings.idiom_game_robot_difficulty == "normal"
     assert settings.idiom_game_target_user_turns == 6
-    assert settings.idiom_game_llm_judge_enabled is False
+    assert settings.idiom_game_llm_judge_enabled is True
     assert settings.idiom_game_llm_judge_min_confidence == 0.8
     assert settings.llm_provider == "dashscope"
     assert settings.llm_model == "qwen3.5-flash-2026-02-23"
