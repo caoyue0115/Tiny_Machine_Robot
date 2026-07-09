@@ -99,6 +99,12 @@ _ROBOT_REPLY_LIMITS: dict[str, int | None] = {
     "hard": 10000,
     "full": None,
 }
+_DIFFICULTY_TARGET_TURNS = {
+    "easy": 8,
+    "normal": 15,
+    "hard": 25,
+    "full": 50,
+}
 _DIFFICULTY_LABELS = {
     "easy": "简单",
     "normal": "普通",
@@ -222,6 +228,10 @@ def normalize_robot_difficulty(value: str) -> str:
 
 def robot_difficulty_label(value: str) -> str:
     return _DIFFICULTY_LABELS[normalize_robot_difficulty(value)]
+
+
+def robot_difficulty_target_turns(value: str) -> int:
+    return _DIFFICULTY_TARGET_TURNS[normalize_robot_difficulty(value)]
 
 
 def detect_idiom_difficulty(text: str) -> str | None:
@@ -361,7 +371,7 @@ class IdiomGameSkill:
             self._opening_pool = self._idioms[: min(64, len(self._idioms))]
         self._judge_unknown_idiom = judge_unknown_idiom
         self._judge_min_confidence = max(0.0, min(1.0, float(judge_min_confidence)))
-        self._target_user_turns = max(0, int(target_user_turns))
+        self._target_user_turns_override = max(0, int(target_user_turns))
         self._rng = rng or random.SystemRandom()
         self._store = store or InMemoryIdiomGameStore()
         self._last_trace: dict[str, object] = {}
@@ -381,6 +391,7 @@ class IdiomGameSkill:
             "idiom_event": "start",
             "idiom_expected_py": opening.last_py,
             "idiom_robot_difficulty": robot_difficulty,
+            "idiom_target_user_turns": self._target_user_turns_for(robot_difficulty),
             "idiom_llm_judge_used": False,
         }
         self._store.save(
@@ -411,6 +422,7 @@ class IdiomGameSkill:
             "idiom_event": "turn",
             "idiom_expected_py": state.expected_py,
             "idiom_robot_difficulty": state.robot_difficulty,
+            "idiom_target_user_turns": self._target_user_turns_for(state.robot_difficulty),
             "idiom_llm_judge_used": False,
         }
 
@@ -420,6 +432,8 @@ class IdiomGameSkill:
                 {
                     "idiom_event": "difficulty_switch",
                     "idiom_robot_difficulty": requested_difficulty,
+                    "idiom_target_user_turns": self._target_user_turns_for(requested_difficulty),
+                    "idiom_valid_user_turns": 0,
                 }
             )
             self._store.save(
@@ -427,11 +441,14 @@ class IdiomGameSkill:
                 IdiomGameState(
                     expected_py=state.expected_py,
                     used_words=set(state.used_words),
-                    valid_user_turns=state.valid_user_turns,
+                    valid_user_turns=0,
                     robot_difficulty=requested_difficulty,
                 ),
             )
-            return f"已切换到{robot_difficulty_label(requested_difficulty)}模式。轮到你啦，要接“{state.expected_py}”。"
+            return (
+                f"已切换到{robot_difficulty_label(requested_difficulty)}模式，"
+                f"连续接对轮数已重新计算。轮到你啦，要接“{state.expected_py}”。"
+            )
 
         cleaned = clean_idiom_text(text)
         user_entry = self._extract_user_entry(cleaned, expected_py=state.expected_py)
@@ -449,15 +466,20 @@ class IdiomGameSkill:
         used_words = set(state.used_words)
         used_words.add(user_entry.word)
         valid_user_turns = state.valid_user_turns + 1
-        if self._target_user_turns and valid_user_turns >= self._target_user_turns:
+        target_user_turns = self._target_user_turns_for(state.robot_difficulty)
+        if target_user_turns and valid_user_turns >= target_user_turns:
             self._store.clear(device_id)
             self._last_trace.update(
                 {
                     "idiom_result": "user_win_target_turns",
                     "idiom_valid_user_turns": valid_user_turns,
+                    "idiom_target_user_turns": target_user_turns,
                 }
             )
-            return f"你已经连续接上{valid_user_turns}轮啦，这局你赢。"
+            return (
+                f"你已经连续接上{valid_user_turns}轮啦，"
+                f"{robot_difficulty_label(state.robot_difficulty)}模式挑战成功，这局你赢。"
+            )
 
         reply_entry = self._find_reply(user_entry.last_py, used_words, state.robot_difficulty)
         if reply_entry is None:
@@ -466,6 +488,7 @@ class IdiomGameSkill:
                 {
                     "idiom_result": "user_win_robot_no_reply",
                     "idiom_valid_user_turns": valid_user_turns,
+                    "idiom_target_user_turns": target_user_turns,
                 }
             )
             return f"你接上了“{user_entry.word}”，小机仔暂时接不上啦，这局你赢。"
@@ -475,6 +498,7 @@ class IdiomGameSkill:
             {
                 "idiom_result": "robot_replied",
                 "idiom_valid_user_turns": valid_user_turns,
+                "idiom_target_user_turns": target_user_turns,
                 "idiom_robot_reply_word": reply_entry.word,
                 "idiom_robot_reply_first_py": reply_entry.first_py,
                 "idiom_robot_reply_last_py": reply_entry.last_py,
@@ -576,3 +600,8 @@ class IdiomGameSkill:
         entry = IdiomEntry(word=word, first_py=first_py, last_py=last_py)
         self._record_user_entry_trace(entry, "llm_judge")
         return entry
+
+    def _target_user_turns_for(self, difficulty: str) -> int:
+        if self._target_user_turns_override:
+            return self._target_user_turns_override
+        return robot_difficulty_target_turns(difficulty)

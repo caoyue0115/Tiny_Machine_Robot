@@ -16,7 +16,7 @@ def test_tiny_defaults_identify_public_project_and_realtime_chain() -> None:
     assert settings.enabled_skills == "idiom_game,companion_chat"
     assert settings.idiom_game_ttl_seconds == 900
     assert settings.idiom_game_robot_difficulty == "normal"
-    assert settings.idiom_game_target_user_turns == 6
+    assert settings.idiom_game_target_user_turns == 0
     assert settings.idiom_game_llm_judge_enabled is True
     assert settings.idiom_game_llm_judge_min_confidence == 0.8
     assert settings.llm_provider == "dashscope"

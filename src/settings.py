@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     enabled_skills: str = "idiom_game,companion_chat"
     idiom_game_ttl_seconds: int = 900
     idiom_game_robot_difficulty: str = "normal"
-    idiom_game_target_user_turns: int = 6
+    idiom_game_target_user_turns: int = 0
     idiom_game_llm_judge_enabled: bool = True
     idiom_game_llm_judge_min_confidence: float = 0.8
     max_upload_mb: int = 3

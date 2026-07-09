@@ -22,6 +22,20 @@ def _write_test_wav(frames: bytes) -> str:
     return tmp.name
 
 
+def _build_chain_idioms(turns: int):
+    from src.voice_skills.idiom_game import IdiomEntry
+
+    idioms = [IdiomEntry("开局成语", "kai", "py0")]
+    user_words: list[str] = []
+    for index in range(turns):
+        user_word = f"用户成语{index + 1}"
+        bot_word = f"机器成语{index + 1}"
+        user_words.append(user_word)
+        idioms.append(IdiomEntry(user_word, f"py{index * 2}", f"py{index * 2 + 1}"))
+        idioms.append(IdiomEntry(bot_word, f"py{index * 2 + 1}", f"py{index * 2 + 2}"))
+    return idioms, user_words
+
+
 class VoiceSkillRouterTests(unittest.TestCase):
     def test_start_idiom_game_sets_device_state_and_returns_opening(self) -> None:
         from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore, load_default_idioms
@@ -261,6 +275,75 @@ class VoiceSkillRouterTests(unittest.TestCase):
         result = router.route(device_id="esp-1", text="精忠报国")
 
         self.assertIn("小机仔接：国泰民安", result.answer_text)
+
+    def test_idiom_game_mode_target_turns_are_configured(self) -> None:
+        from src.voice_skills.idiom_game import robot_difficulty_target_turns
+
+        self.assertEqual(robot_difficulty_target_turns("easy"), 8)
+        self.assertEqual(robot_difficulty_target_turns("normal"), 15)
+        self.assertEqual(robot_difficulty_target_turns("hard"), 25)
+        self.assertEqual(robot_difficulty_target_turns("full"), 50)
+
+    def test_idiom_game_easy_mode_user_wins_after_eight_valid_turns(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore
+        from src.voice_skills.router import SkillRouter
+
+        idioms, user_words = _build_chain_idioms(8)
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                idioms,
+                store=store,
+                opening_words=("开局成语",),
+                robot_difficulty="easy",
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙简单模式")
+
+        result = None
+        for index, word in enumerate(user_words, start=1):
+            result = router.route(device_id="esp-1", text=word)
+            if index < 8:
+                self.assertIn("小机仔接：", result.answer_text)
+                self.assertTrue(store.is_active("esp-1"))
+
+        self.assertIsNotNone(result)
+        self.assertIn("连续接上8轮", result.answer_text)
+        self.assertIn("简单模式挑战成功", result.answer_text)
+        self.assertFalse(store.is_active("esp-1"))
+
+    def test_idiom_game_switching_mode_resets_valid_turn_counter(self) -> None:
+        from src.voice_skills.idiom_game import IdiomGameSkill, InMemoryIdiomGameStore
+        from src.voice_skills.router import SkillRouter
+
+        idioms, user_words = _build_chain_idioms(3)
+        store = InMemoryIdiomGameStore(ttl_seconds=900)
+        router = SkillRouter(
+            idiom_skill=IdiomGameSkill(
+                idioms,
+                store=store,
+                opening_words=("开局成语",),
+                robot_difficulty="normal",
+                target_user_turns=2,
+            ),
+            companion_streamer=lambda text, answer_mode=None: iter([f"chat:{text}"]),
+        )
+        router.route(device_id="esp-1", text="开始成语接龙")
+        first = router.route(device_id="esp-1", text=user_words[0])
+        self.assertIn("小机仔接：", first.answer_text)
+        self.assertEqual(store.get("esp-1").valid_user_turns, 1)
+
+        switched = router.route(device_id="esp-1", text="切换到困难模式")
+        state_after_switch = store.get("esp-1")
+        self.assertEqual(state_after_switch.robot_difficulty, "hard")
+        self.assertEqual(state_after_switch.valid_user_turns, 0)
+        self.assertIn("连续接对轮数已重新计算", switched.answer_text)
+
+        second = router.route(device_id="esp-1", text=user_words[1])
+        self.assertIn("小机仔接：", second.answer_text)
+        self.assertTrue(store.is_active("esp-1"))
+        self.assertEqual(store.get("esp-1").valid_user_turns, 1)
 
     def test_idiom_game_limited_robot_pool_lets_user_win(self) -> None:
         from src.voice_skills.idiom_game import IdiomEntry, IdiomGameSkill, InMemoryIdiomGameStore
